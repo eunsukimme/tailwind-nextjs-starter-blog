@@ -7,7 +7,7 @@ const siteMetadata = {
   language: 'ko-kr',
   theme: 'system', // system, dark or light
   siteUrl: 'https://blog.eunsukim.me',
-  siteRepo: 'https://github.com/eunsukimme/my-blog-v2',
+  siteRepo: 'https://github.com/eunsukimme/tailwind-nextjs-starter-blog',
   siteLogo: '/static/images/logo.png', // TODO:
   image: '/static/images/avatar-me.jpg',
   socialBanner: '/static/images/twitter-card.png',
@@ -48,7 +48,7 @@ const siteMetadata = {
     // Please add your .env file and modify it according to your selection
     provider: 'buttondown',
   },
-  comment: {
+  comments: {
     // If you want to use an analytics provider you have to add it to the
     // content security policy in the `next.config.js` file.
     // Select a provider and use the environment variables associated to it
@@ -61,7 +61,7 @@ const siteMetadata = {
       repositoryId: process.env.NEXT_PUBLIC_GISCUS_REPOSITORY_ID,
       category: process.env.NEXT_PUBLIC_GISCUS_CATEGORY,
       categoryId: process.env.NEXT_PUBLIC_GISCUS_CATEGORY_ID,
-      mapping: 'title', // supported options: pathname, url, title
+      mapping: 'og:title', // supported options: pathname, url, title
       reactions: '1', // Emoji reactions: 1 = enable / 0 = disable
       // Send discussion metadata periodically to the parent window: 1 = enable / 0 = disable
       metadata: '0',
@@ -74,6 +74,7 @@ const siteMetadata = {
       // please provide a link below to your custom theme css file.
       // example: https://giscus.app/themes/custom_example.css
       themeURL: '',
+      lang: 'en',
     },
   },
 
