@@ -1,0 +1,328 @@
+---
+title: Chrome DevTools로 JS 메모리 누수(Memory Leak) 디버깅하기
+summary: Chrome DevTools를 활용하여 Javascript 메모리 누수를 디버깅 한 경험을 기록합니다.
+date: '2022-03-27T20:00:00+09:00'
+lastmod: '2022-04-23T00:15:00+09:00'
+draft: false
+tags: ['javascript', 'browser', 'chrome', 'memoryleak']
+images: ['/static/media/debugging-javascript-memory-leak-with-chrome-devtools/social-image.png']
+---
+
+회사에서 만드는 웹앱에 메모리 누수가 생기는 이슈가 있었는데, 이 이슈를 해결한 과정을 기록하고자 한다.
+이번 포스팅에서는 Chrome DevTools의 메모리 관련 기능들, 그리고 메모리 누수 진단 및 해결 방법에 대해 소개하고자 한다.
+
+# Intro
+
+현재 속한 팀에서 개발자 교육에 사용되는 LMS를 만들고 있는데, 여기에 라이브 클래스룸이란 기능이 탑재되어있다.
+라이브 클래스룸(A.K.A 라클룸)은 실시간으로 인터랙티브한 교육이 이뤄지도록 하는 WebRTC 애플리케이션인데, 아래 스크린샷을 보면 어떤 기능인지 대략 감이 잡힐 것이다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/liveclass-room.jpg" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    라이브 클래스룸 애플리케이션 UI 디자인
+  </figcaption>
+</figure>
+
+그런데 이 라클룸을 개발하는 중 앱이 어느 순간부터 느리게 동작하는 현상을 발견했다. 새로고침을 하면 한참을 기다려야 페이지가 로드된다거나, 채팅 입력이 느려지는 등의 현상이 발견됐다.
+그래서 이러한 경험을 개선하는 과제가 나에게 주어졌고, 나는 메모리 쪽 이슈인 것 같다고 짐작하고 문제를 자세히 살펴보기로 했다.
+
+## 3 Types of Memory Issues
+
+메모리 관련 이슈는 크게 3가지 유형으로 나타난다.
+
+### 1. 페이지가 시간이 지남에 따라 느려진다
+
+처음에는 페이지가 느리단 걸 인식하지 못하지만, 시간이 지남에 따라 느리다고 느껴지는 경우 메모리 누수, 즉 메모리릭(Memory Leak)이 발생한다고 볼 수 있다.
+
+### 2. 페이지가 일관되게 느리다
+
+페이지가 처음부터 느리다고 느껴진다면, 이는 Memory bloat으로 볼 수 있다. Memory bloat은 페이지가 최적화된 속도에 필요한 메모리보다 기본적으로 더 많은 메모리를 사용하는 것을 말한다.
+
+### 3. 페이지가 뚝 뚝 끊긴다
+
+페이지가 뚝 뚝 끊기는 현상은 가비지 콜렉션(Garbage Collection)이 너무 자주 일어날 때 발생한다. GC는 사용하지 않는 메모리를 해제하는 역할을 하는데, GC가 도는 시점은 브라우저가 결정한다(또는 브라우저 개발자 도구에서 직접 실행할 수도 있다).
+GC가 돌면 모든 JS 스크립트의 실행이 중지된다. 즉, GC가 자주 돈다는 것은 JS 스크립트의 실행이 자주 멈춘다는 것이다.
+
+라클룸의 경우는 페이지가 처음부터 느리진 않은데, 시간이 지나야 느리단게 느껴졌기 때문에 1번, 메모리릭이 발생하고 있다고 판단했다.
+정확히 어떤 상황에서 메모리릭이 발생하는지 살펴보기 위해, 본격적으로 Chrome DevTools를 활용해 메모리 사용량을 검사해보았다.
+
+# Monitor memory usage with the Chrome Task Manager
+
+메모리 이슈를 진단하기 위해선 Chrome Task Manager로 메모리 사용량을 보는것이 좋다. 메모리 사용량을 실시간으로 모니터링할 수 있기 때문이다.
+**Chrome 우측 상단 메뉴** > **More Tools** > **Task Manager**를 실행하면 다음과 같은 화면이 나온다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/chrome-task-manager-before-test.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>Chrome Task Manager</figcaption>
+</figure>
+
+여기서 눈여겨봐야 할 컬럼은 **Memory Footprint**와 **Javascript Memory**이다.
+
+- **Memory Footprint** 컬럼은 native memory 사용량을 보여준다. DOM 노드는 네이티브 메모리에 저장되는데, 만약 이 컬럼 값이 증가한다면 DOM 노드가 증가한다는 의미다.
+- **Javascript Memory** 컬럼은 JS Heap 사용량을 보여준다. 여기서 `()`로 감싸진 부분이 중요한데, 이 부분이 live number로 현재 페이지에서 접근 가능한 객체들이 사용중인 메모리를 뜻한다.
+  이 부분이 증가한다는 것은 객체가 새로 생성되거나, 이미 존재한 객체가 더 커진 걸 의미한다.
+
+라이브 클래스룸창을 띄워두고 Chrome Task Manager로 메모리 사용량을 살펴보았다.
+여러가지 액션을 수행하면서 메모리를 모니터링 하는 도중, 카메라가 나오는 영역 페이지를 넘길때마다(`<`, `>` 버튼 클릭) live number가 증가하는 현상을 발견했다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/chrome-task-manager-after-test.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    여러번 페이지네이션 수행 후 Chrome Task Manager. 위 사진(초기 상태)보다 Memory Footprint가 50MB,
+    Javascript Memory가 93,000K가 증가했다.
+  </figcaption>
+</figure>
+
+좀 더 자세히 살펴보기 위해 Chrome Performance탭의 Profiling 기능을 활용해보았다.
+
+# Chrome performance profiling
+
+Chrome DevTools에서 **Performance** > **Memory 체크박스** 선택(활성화) 후 Record 버튼을 누르면 시간에 따른 메모리 사용량을 시각화해서 보여준다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/chrome-devtools-performance-tab.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>Chrome DevTools의 Performance 탭</figcaption>
+</figure>
+
+Record 버튼을 누르고 페이지네이션을 여러번 수행해본 다음 stop 버튼을 눌러 중지해보니, 다음과 같은 결과가 나왔다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/performance-profiling-result-compare-before.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>Chrome Performance Profiling Result</figcaption>
+</figure>
+
+위 그래프를 살펴보면 JS Heap, Documents, Nodes, Listeners가 모두 계단식으로 증가하고있다. 즉 이를 바탕으로 다음과 같은 문제가 있다는 것을 인식할 수 있다.
+
+- **JS Heap에서 메모리 릭이 발생하고 있다**.
+- **할당된 Listeners가 해제되지 않고 있다**.
+- **Documents, Nodes가 계속 쌓여간다. 즉, detached DOM<sup>[[1]](#detached_dom)</sup>들이 존재한다**.
+
+이러한 문제를 해결한 과정을 위 순서대로 소개하겠다.
+
+# Debugging JS heap memory leak with Allocation Timeline
+
+JS Heap에서 발생한 메모리릭을 살펴보려면 Chrome DevTools에서 **Memory** > **Profiles** > **Allocation instrumentation on timeline** 을 선택한 뒤 `Start` 버튼을 눌러
+분석을 시작할 수 있다.
+
+<figure style={{ maxWidth: '500px' }}>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/chrome-devtools-memory-tab-allocation-timeline.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    Chrome DevTools의 Memory 탭 - Heap Allocation Timeline 기능
+  </figcaption>
+</figure>
+
+메모리릭을 발생시킬 것으로 의심되는 액션을 몇 차례 수행한 뒤, `Stop` 버튼을 눌러 분석을 종료하니 다음과 같은 화면을 볼 수 있었다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/first-memory-allocation-timeline-result.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    Chrome Memory Allocation Timeline Result
+  </figcaption>
+</figure>
+
+왼쪽 패널은 분석 결과 목록을 나타내고 오른쪽 패널은 시간에 따른 메모리 사용량과 관련 정보를 보여준다.
+그래프를 보면 페이지네이션을 시도한 순간에 파란색 막대가 생겼는데, 파란 막대는 해당 순간의 메모리 할당을 나타낸다.
+원래 회색 막대도 보이는데, 파란 막대 위쪽 끝에 살짝 올려져서 지금은 잘 안보인다. 회색 막대는 메모리 해제를 의미한다. 회색 막대가 잘 안보인다는 것은 할당 후 해제가 안되는, 즉 메모리릭이 발생한다는 뜻이다.
+
+0 ~ 5초 사이에 막대가 하나 보여서 해당 부분을 선택해보고, Retained Size<sup>[[2]](#retained_size)</sup>를 기준으로 내림차순 정렬해보니 system 다음으로 `AnimationItem` 생성자가 가장 많은 Retained Size를 차지했다.
+이 `AnimationItem` 생성자를 호출한 곳은 `lottie.js:14372`이다. 즉, lottie를 사용하는 코드에서 문제가 있는 것으로 판단된다.
+
+라이브 클래스룸 코드를 살펴보니 실제로 lottie를 사용하는 `lottie-web` 라이브러리를 활용하여 애니메이션을 보여주는 컴포넌트가 있었다.
+해당 컴포넌트에서 마운트되는 시점에 `lottie.loadAnimation()` 으로 애니메이션을 불러오고 있었다.
+lottie 공식 문서를 찾아보니 `lottie.loadAnimation()` 함수가 호출되면 animation instance를 반환하는데, 해당 인스턴스의 메소드로 `.destroy()`가 있단 걸 알게됐다.
+메모리를 해제해주는 것 같은 이름의 메소드가 있단 것은 해당 컴포넌트가 unmount될 때 이를 호출해줘야 할 것 같단 생각이 들었고, 이를 적용해보았다.
+
+```typescript
+// Lottie.vue
+onUnmounted(() => {
+  animation.value?.stop()
+  animation.value?.destroy()
+})
+```
+
+그런 다음 Performance Profiling을 수행해보았다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/performance-profiling-result-after-fix.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    unmount시에 animation instance를 destroy 해준 다음 측정한 Chrome Performance Profiling Result
+  </figcaption>
+</figure>
+
+JS Heap 그래프가 GC가 돌 때마다 뚝뚝 떨어진다. 이전의 계단식 모양을 유지하지 않는다. 이로써 JS Heap 메모리릭은 해결할 수 있었다.
+
+## Removing Event Listeners on unmount
+
+또 기존에는 애니메이션이 필요하지 않은 상황에서도 lottie를 렌더링 하고 있었는데, `v-if` directive를 사용하여 필요한 경우에만 lottie를 렌더링하도록 하고,
+애니메이션이 로드된 시점에서 `complete` 이벤트 리스너를 추가하던 부분이 있었는데 unmount 할 때 이벤트 리스너를 제거하도록 수정해보았다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/performance-profiling-result-after-removing-event-listeners.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    unmount시에 event listener를 제거해준 다음 측정한 Chrome Performance Profiling Result
+  </figcaption>
+</figure>
+
+Listeners 그래프도 GC가 돌때 JS Heap과 함께 감소하는 것을 확인할 수 있었다. 이로써 Listeners 문제도 해결할 수 있었다.
+
+# Debugging Detached DOM with Heap Snapshots
+
+마지막으로 detached DOM 문제를 해결하기 위해 Chrome DevTools에서 **Memory** > **Profiles** > **Heap Snapshots** 을 선택한 뒤 `Take snapshot` 버튼을 눌러
+해당 시점의 JS와 DOM 노드 사이의 메모리가 어떻게 분배되어 있는지 확인할 수 있다.
+
+<figure style={{ maxWidth: '500px' }}>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/chrome-devtools-memory-tab-heap-snapshot.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    Chrome DevTools의 Memory 탭 - Heap Snapshot 기능
+  </figcaption>
+</figure>
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/first-memory-heap-snatshot.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>Chrome Memory Heap Snapshots Result</figcaption>
+</figure>
+
+`Snapshot 1`은 Major GC이후, 페이지 전환 시도하기 전 초기 메모리 상태를 기록하고자 dump한 메모리 스냅샷이고 `Snapshot 2`는 페이지 전환 시도 후 메모리 스냅샷이다.
+`Snapshot 1`과 `Snapshot 2`를 비교한 Comparison 뷰에서 `detached` 키워드로 필터링하고 Size Delta를 기준으로 내림차순 정렬하면, `SVG**Element` 가 상위에 기록된다.
+즉, 페이지 전환 클릭 시 현재 화면에서 SVGElement가 사라지지만, JS에 의해 여전히 참조되고 있는 것 같다.
+
+그래서 코드를 살펴보니 페이지 전환할 때 렌더링되는 컴포넌트 안에서 `<SvgIcon />` 이란 컴포넌트를 사용하고 있었고, 여기서 svg를 렌더링하고 있었다.
+`<SvgIcon />`가 svg를 image sprite 처럼 사용할 목적으로 여러 symbol이 정의된 `defs.svg` 를 `<use>` 태그로 참조할 수 있게 만들어둔 컴포넌트인데, 여기서 무언가 문제가 되는 것 같았다.
+그래서 해당 컴포넌트를 제거해보고 힙 스냅샷을 기록해보았다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/memory-heap-snapshot-after-remove-svg.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    `<SvgIcon />` 컴포넌트를 제거한 뒤 측정한 Chrome Memory Heap Snapshots Result
+  </figcaption>
+</figure>
+
+`<SvgIcon />` 컴포넌트를 제거해보니 detached DOM들이 대부분 제거된 것을 확인할 수 있었다. 그래서 해당 컴포넌트를 빼고 svg를 inline 시킨 별도의 컴포넌트로 교체하는 작업을 진행했다.
+그런 다음 다시 한 번 힙 스냅샷을 떠봤다.
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/memory-heap-snapshot-after-inlining-svg.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    `<SvgIcon />` 컴포넌트를 inline svg 컴포넌트로 교체한 뒤 측정한 Chrome Memory Heap Snapshots
+    Result
+  </figcaption>
+</figure>
+
+`<SvgIcon />` 컴포넌트를 완전히 제거한 것 보단 detached DOM들이 생성되었지만, 메모리에 미치는 영향은 매우 미미하다고 판단된다(~70KB).
+마음같아선 detached DOM들이 아예 안생기게 svg를 `<img />` 태그의 `src`로 사용하고 싶었지만, 라이브 클래스룸 웹앱에서 사용한 svg의 경우 css로 색깔을 변경하고 있었기 때문에, 일단 svg를 inline한 컴포넌트를 사용하는 방식으로 문제를 해결했다.
+
+# Comparison
+
+이렇게 해서 3가지 메모리 이슈를 모두 해결했다. 여기까지 디버깅을 진행하면서 얼마만큼의 메모리 사용량이 개선되었는지 측정해보았다.
+라이브 클래스룸에서 카메라 영역을 총 10번 페이지네이션 할 경우의 Heap Snapshots, Allocation Timeline, Chrome performance profiling 결과를 비교하면 다음과 같다.
+
+## Heap Snapshots - Before
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/memory-heap-snapshot-compare-before.png" />
+</figure>
+
+| 항목          | 스냅샷 1 | 스냅샷 2 | 델타(Δ)   |
+| ------------- | -------- | -------- | --------- |
+| Heap Snapshot | 124MB    | 169MB    | **+45MB** |
+
+## Heap Snapshots - After
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/memory-heap-snapshot-compare-after.png" />
+</figure>
+
+| 항목          | 스냅샷 1 | 스냅샷 2 | 델타(Δ)         |
+| ------------- | -------- | -------- | --------------- |
+| Heap Snapshot | 127MB    | 118MB    | **-9MB(-120%)** |
+
+## Allocation Timeline - Before
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/memory-allocation-timeline-compare-before.png" />
+</figure>
+
+| 항목              | 델타(Δ)   |
+| ----------------- | --------- |
+| Memory Allocation | **+31MB** |
+
+## Allocation Timeline - After
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/memory-allocation-timeline-compare-after.png" />
+</figure>
+
+| 항목              | 델타(Δ)          |
+| ----------------- | ---------------- |
+| Memory Allocation | **+990KB(-96%)** |
+
+## Performance Profile - Before
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/performance-profiling-result-compare-before.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    First Chrome Performance Profiling Result
+  </figcaption>
+</figure>
+
+| 항목      | GC 후 초기 상태 | 페이지네이션 및 GC 후 | 델타(Δ)      |
+| --------- | --------------- | --------------------- | ------------ |
+| JS Heap   | 112MB           | 132MB                 | **+20MB**    |
+| Documents | 4개             | 14개                  | **+10개**    |
+| Nodes     | 3307개          | 17243개               | **+13936개** |
+| Listeners | 459개           | 499개                 | **+40개**    |
+
+## Performance Profile - After
+
+<figure>
+  <img src="/static/media/debugging-javascript-memory-leak-with-chrome-devtools/performance-profiling-result-compare-after.png" />
+  <figcaption style={{ margin: 0, color: 'grey' }}>
+    Final Chrome Performance Profiling Result
+  </figcaption>
+</figure>
+
+| 항목      | GC 후 초기 상태 | 페이지네이션 및 GC 후 | 델타(Δ)          |
+| --------- | --------------- | --------------------- | ---------------- |
+| JS Heap   | 94MB            | 91MB                  | **-3MB(-100%)**  |
+| Documents | 5개             | 5개                   | **+0개(-100%)**  |
+| Nodes     | 4507개          | 5041개                | **+534개(-96%)** |
+| Listeners | 473개           | 473개                 | **+0개(-100%)**  |
+
+대부분의 항목에서 큰 메모리 성능 개선을 이뤘다. 그러나 아직 Nodes의 그래프가 여전히 계단식을 띄고 있다.
+벌써 눈치챈 분도 있겠지만 Heap Snapshots, Allocation Timeline에서 이제는 Vue Component가 문제가 되는 걸 확인할 수 있다.
+여기서 언급하진 않았지만 이후에 Vue Component로 인한 메모리 누수도 위에서 소개한 도구를 활용하여 진단하고 해결하였다.
+
+# Recap
+
+이번 포스팅에서는 Chrome DevTools를 활용하여 메모리릭 이슈를 해결한 과정을 소개하였다. 여기서 해결한 문제와 각각에 해당하는 진단 및 해결 방법은 다음과 같다.
+
+- **JS Heap memory leak**
+  - **Memory Allocation Timeline**으로 진단 후 Lottie 애니메이션 인스턴스가 unmount시에 destroy 되도록하여 해결
+- **Event Listeners memory leak**
+  - **Chrome Performance Profiling**으로 진단 후 Lottie 애니메이션 인스턴스에 추가한 이벤트 리스너가 unmount시에 remove 되도록하여 해결
+- **detached DOM memory leak**
+  - **Chrome Memory Heap Snapshots**로 진단 후 문제가 있는 `<SvgIcon />` 컴포넌트를 별도 svg 컴포넌트로 교체하여 해결
+
+# Footnotes
+
+<a name="detached_dom">1.</a>
+현재 페이지에서 더 이상 존재하지 않지만 JS에 의해 여전히 참조되고 있는 DOM element를 말한다. 브라우저가
+이러한 detached DOM들을 GC로 수직하기 위해선, JS의 참조를 해제해주어야 한다.
+
+<a name="retained_size">2.</a>
+Retained size는 특정 객체에 의해 접근할 수 있는 객체들의 Shallow Size<sup>[[3]](#shallow_size)</sup>의
+합이다. 즉 해당 객체가 GC에 의해 수집될 때 GC가 해제할 메모리 양을 나타낸다.
+
+<a name="shallow_size">3.</a>
+오브젝트 스스로 들고있는 메모리이다. 일반적으로 string, array만이 significant shallow size 메모리를 차지할
+수 있다.
+
+# References
+
+- [Chrome Developers - Record heap snapshots](https://developer.chrome.com/docs/devtools/memory-problems/heap-snapshots/)
+- [Chrome Developers - Memory terminology](https://developer.chrome.com/docs/devtools/memory-problems/memory-101/)
+- [자바스크립트에서 메모리 누수의 4가지 형태](https://itstory.tk/entry/%EC%9E%90%EB%B0%94%EC%8A%A4%ED%81%AC%EB%A6%BD%ED%8A%B8%EC%97%90%EC%84%9C-%EB%A9%94%EB%AA%A8%EB%A6%AC-%EB%88%84%EC%88%98%EC%9D%98-4%EA%B0%80%EC%A7%80-%ED%98%95%ED%83%9C)
+- [Vue 컴포넌트 - 메모리 누수 분석하기](https://engineering.linecorp.com/ko/blog/vue-memory-leak-analysis/)
+- [Finding and debugging memory leaks in JavaScript with Chrome DevTools](http://slides.com/gruizdevilla/memory#/9)
+- [Vue cookbook - Avoiding Memory Leaks](https://v2.vuejs.org/v2/cookbook/avoiding-memory-leaks.html#Resolving-the-Memory-Leak)
+- [Toast UI - 당신이 모르는 자바스크립트의 메모리 누수의 비밀](https://ui.toast.com/weekly-pick/ko_20210611)
