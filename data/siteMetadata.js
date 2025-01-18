@@ -17,7 +17,7 @@ const siteMetadata = {
   facebook: 'https://www.facebook.com/people/%EA%B9%80%EC%9D%80%EC%88%98/100003647254099/',
   // youtube: 'https://youtube.com',
   linkedin: 'https://www.linkedin.com/in/eunsukimme/',
-  instagram: 'https://www.instagram.com/e.__s._/',
+  instagram: 'https://www.instagram.com/eunsukimme/',
   locale: 'ko-KR',
   analytics: {
     // If you want to use an analytics provider you have to add it to the
